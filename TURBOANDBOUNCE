@@ -1,0 +1,1210 @@
+local Players = game:GetService("Players")
+local UIS = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+------------------------------------------------
+-- CLEAN OLD UI
+------------------------------------------------
+local old = playerGui:FindFirstChild("SuspensionUI")
+if old then old:Destroy() end
+
+------------------------------------------------
+-- STATE
+------------------------------------------------
+local Springs  = {}
+local Defaults = {}
+local SliderData = {}
+local mouse = player:GetMouse()
+local pulseActive = false
+local PulseStrength = 10
+
+------------------------------------------------
+-- DETECTION
+-- 1. Find nearest model named "Wheels"
+-- 2. Confirm it has FL FR RL RR as direct children
+-- 3. Search anywhere INSIDE each child for object with "spring" in name
+------------------------------------------------
+local function findSpringInWheel(wheelPart)
+	for _, desc in ipairs(wheelPart:GetDescendants()) do
+		if desc.Name:lower():find("spring") then
+			-- verify it has FreeLength
+			local ok, _ = pcall(function() return desc.FreeLength end)
+			if ok then
+				return desc
+			end
+		end
+	end
+	return nil
+end
+
+local function findNearestCar()
+	print("[SUS] Scanning for nearest Wheels model...")
+
+	local char = player.Character or player.CharacterAdded:Wait()
+	local root = char:WaitForChild("HumanoidRootPart")
+
+	local nearestModel = nil
+	local nearestDist  = math.huge
+
+	-- Find nearest model literally named "Wheels"
+	for _, obj in ipairs(workspace:GetDescendants()) do
+		if obj:IsA("Model") and obj.Name == "Wheels" then
+			local primary = obj.PrimaryPart
+			local pos = primary and primary.Position
+				or (obj:FindFirstChildWhichIsA("BasePart") and obj:FindFirstChildWhichIsA("BasePart").Position)
+			if pos then
+				local d = (pos - root.Position).Magnitude
+				if d < nearestDist then
+					nearestDist  = d
+					nearestModel = obj
+				end
+			end
+		end
+	end
+
+	if not nearestModel then
+		warn("[SUS] No model named 'Wheels' found in workspace")
+		return false
+	end
+
+	print("[SUS] Found Wheels model:", nearestModel:GetFullName(), "| dist:", string.format("%.1f", nearestDist))
+
+	-- Verify direct children FL FR RL RR exist
+	local wheelNames = {"FL", "FR", "RL", "RR"}
+	local found = {}
+	for _, name in ipairs(wheelNames) do
+		local child = nearestModel:FindFirstChild(name)
+		if child then
+			found[name] = child
+			print("[SUS] Verified child:", name)
+		else
+			warn("[SUS] Missing child:", name)
+		end
+	end
+
+	if not (found.FL or found.FR or found.RL or found.RR) then
+		warn("[SUS] Wheels model has none of FL/FR/RL/RR as children — wrong model?")
+		return false
+	end
+
+	-- Find springs inside each wheel
+	Springs  = {}
+	Defaults = {}
+
+	for name, wheelPart in pairs(found) do
+		local spring = findSpringInWheel(wheelPart)
+		Springs[name] = spring
+		if spring then
+			local ok, val = pcall(function() return spring.FreeLength end)
+			if ok then Defaults[name] = val end
+			print("[SUS] Spring found for", name, "->", spring:GetFullName())
+		else
+			warn("[SUS] No spring found inside", name)
+		end
+	end
+
+	return true
+end
+
+------------------------------------------------
+-- SET WHEEL
+------------------------------------------------
+local function setWheel(name, value)
+	local spring = Springs[name]
+	if not spring then return end
+
+	pcall(function()
+		spring.FreeLength = value
+		spring.MaxLength  = value + 0.2
+	end)
+
+	local ui = SliderData[name]
+	if ui then
+		ui.label.Text = name .. "  " .. string.format("%.2f", value)
+		ui.fill.Size  = UDim2.new(math.clamp(value / 10, 0, 1), 0, 1, 0)
+	end
+end
+
+------------------------------------------------
+-- PULSE
+------------------------------------------------
+local function pulseFront()
+	if pulseActive then return end
+	pulseActive = true
+
+	local fl = Springs.FL
+	local fr = Springs.FR
+	if not fl or not fr then
+		warn("[SUS] No front springs for pulse")
+		pulseActive = false
+		return
+	end
+
+	local dFL = Defaults.FL or fl.FreeLength
+	local dFR = Defaults.FR or fr.FreeLength
+
+	pcall(function()
+		fl.FreeLength = 0.5
+		fr.FreeLength = 0.5
+	end)
+	task.wait(0.05)
+	pcall(function()
+		fl.FreeLength = PulseStrength
+		fr.FreeLength = PulseStrength
+	end)
+	task.wait(0.18)
+	pcall(function()
+		fl.FreeLength = dFL
+		fr.FreeLength = dFR
+	end)
+
+	pulseActive = false
+end
+
+UIS.InputBegan:Connect(function(i, gp)
+	if not gp and i.KeyCode == Enum.KeyCode.K then
+		pulseFront()
+	end
+end)
+
+------------------------------------------------
+-- SCAN
+------------------------------------------------
+if not findNearestCar() then
+	warn("[SUS] Could not find car — aborting UI.")
+	return
+end
+
+------------------------------------------------
+-- GUI
+------------------------------------------------
+local gui = Instance.new("ScreenGui")
+gui.Name           = "SuspensionUI"
+gui.ResetOnSpawn   = false
+gui.IgnoreGuiInset = true
+gui.DisplayOrder   = 999
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Global
+gui.Parent         = playerGui
+
+-- Main frame
+local W, H = 300, 620
+local frame = Instance.new("Frame")
+frame.Name                   = "Frame"
+frame.Size                   = UDim2.new(0, W, 0, H)
+frame.Position               = UDim2.new(0, 40, 0.5, -(H/2))
+frame.BackgroundColor3       = Color3.fromRGB(12, 12, 14)
+frame.BorderSizePixel        = 0
+frame.ClipsDescendants       = true
+frame.Parent                 = gui
+
+local corner = Instance.new("UICorner")
+corner.CornerRadius = UDim.new(0, 14)
+corner.Parent = frame
+
+-- Subtle border glow
+local stroke = Instance.new("UIStroke")
+stroke.Color       = Color3.fromRGB(60, 120, 255)
+stroke.Thickness   = 1.5
+stroke.Transparency = 0.5
+stroke.Parent      = frame
+
+-- Header bar (drag handle)
+local header = Instance.new("Frame")
+header.Name            = "Header"
+header.Size            = UDim2.new(1, 0, 0, 46)
+header.BackgroundColor3 = Color3.fromRGB(20, 20, 26)
+header.BorderSizePixel = 0
+header.ZIndex          = 5
+header.Parent          = frame
+
+local headerCorner = Instance.new("UICorner")
+headerCorner.CornerRadius = UDim.new(0, 14)
+headerCorner.Parent = header
+
+-- Accent bar under header
+local accent = Instance.new("Frame")
+accent.Size             = UDim2.new(1, 0, 0, 2)
+accent.Position         = UDim2.new(0, 0, 1, -1)
+accent.BackgroundColor3 = Color3.fromRGB(60, 120, 255)
+accent.BorderSizePixel  = 0
+accent.Parent           = header
+
+-- Title text
+local titleLabel = Instance.new("TextLabel")
+titleLabel.Size                = UDim2.new(1, -60, 1, 0)
+titleLabel.Position            = UDim2.new(0, 16, 0, 0)
+titleLabel.BackgroundTransparency = 1
+titleLabel.Text                = "SUSPENSION"
+titleLabel.TextColor3          = Color3.new(1, 1, 1)
+titleLabel.Font                = Enum.Font.GothamBold
+titleLabel.TextSize            = 15
+titleLabel.TextXAlignment      = Enum.TextXAlignment.Left
+titleLabel.ZIndex              = 6
+titleLabel.Parent              = header
+
+-- Subtitle
+local subLabel = Instance.new("TextLabel")
+subLabel.Size                = UDim2.new(1, -60, 0, 14)
+subLabel.Position            = UDim2.new(0, 16, 0, 28)
+subLabel.BackgroundTransparency = 1
+subLabel.Text                = "CONTROL PANEL"
+subLabel.TextColor3          = Color3.fromRGB(60, 120, 255)
+subLabel.Font                = Enum.Font.GothamBold
+subLabel.TextSize            = 10
+subLabel.TextXAlignment      = Enum.TextXAlignment.Left
+subLabel.ZIndex              = 6
+subLabel.Parent              = header
+
+-- Drag indicator dots
+local dotsLabel = Instance.new("TextLabel")
+dotsLabel.Size                = UDim2.new(0, 40, 1, 0)
+dotsLabel.Position            = UDim2.new(1, -50, 0, 0)
+dotsLabel.BackgroundTransparency = 1
+dotsLabel.Text                = "⠿"
+dotsLabel.TextColor3          = Color3.fromRGB(80, 80, 100)
+dotsLabel.Font                = Enum.Font.GothamBold
+dotsLabel.TextSize            = 18
+dotsLabel.ZIndex              = 6
+dotsLabel.Parent              = header
+
+------------------------------------------------
+-- DRAGGABLE LOGIC
+------------------------------------------------
+do
+	local dragging = false
+	local dragStart, startPos
+
+	header.InputBegan:Connect(function(i)
+		if i.UserInputType == Enum.UserInputType.MouseButton1
+			or i.UserInputType == Enum.UserInputType.Touch then
+			dragging  = true
+			dragStart = i.Position
+			startPos  = frame.Position
+		end
+	end)
+
+	UIS.InputChanged:Connect(function(i)
+		if not dragging then return end
+		if i.UserInputType == Enum.UserInputType.MouseMovement
+			or i.UserInputType == Enum.UserInputType.Touch then
+			local delta = i.Position - dragStart
+			frame.Position = UDim2.new(
+				startPos.X.Scale,
+				startPos.X.Offset + delta.X,
+				startPos.Y.Scale,
+				startPos.Y.Offset + delta.Y
+			)
+		end
+	end)
+
+	UIS.InputEnded:Connect(function(i)
+		if i.UserInputType == Enum.UserInputType.MouseButton1
+			or i.UserInputType == Enum.UserInputType.Touch then
+			dragging = false
+		end
+	end)
+end
+
+------------------------------------------------
+-- CONTENT SCROLL CONTAINER
+------------------------------------------------
+local content = Instance.new("Frame")
+content.Name            = "Content"
+content.Size            = UDim2.new(1, 0, 1, -48)
+content.Position        = UDim2.new(0, 0, 0, 48)
+content.BackgroundTransparency = 1
+content.Parent          = frame
+
+local yPad = 12  -- current y cursor inside content
+
+------------------------------------------------
+-- SECTION LABEL
+------------------------------------------------
+local function makeSection(text, y)
+	local lbl = Instance.new("TextLabel")
+	lbl.Size                = UDim2.new(1, -24, 0, 16)
+	lbl.Position            = UDim2.new(0, 12, 0, y)
+	lbl.BackgroundTransparency = 1
+	lbl.Text                = text
+	lbl.TextColor3          = Color3.fromRGB(60, 120, 255)
+	lbl.Font                = Enum.Font.GothamBold
+	lbl.TextSize            = 10
+	lbl.TextXAlignment      = Enum.TextXAlignment.Left
+	lbl.Parent              = content
+	return lbl
+end
+
+------------------------------------------------
+-- BUTTON
+------------------------------------------------
+local function makeButton(text, y, h, color, callback)
+	local bg = Instance.new("Frame")
+	bg.Size             = UDim2.new(1, -24, 0, h)
+	bg.Position         = UDim2.new(0, 12, 0, y)
+	bg.BackgroundColor3 = color
+	bg.BorderSizePixel  = 0
+	bg.Parent           = content
+	Instance.new("UICorner", bg).CornerRadius = UDim.new(0, 8)
+
+	local b = Instance.new("TextButton")
+	b.Size                   = UDim2.new(1, 0, 1, 0)
+	b.BackgroundTransparency = 1
+	b.TextColor3             = Color3.new(1, 1, 1)
+	b.Text                   = text
+	b.Font                   = Enum.Font.GothamBold
+	b.TextSize               = 12
+	b.Parent                 = bg
+
+	b.MouseButton1Click:Connect(callback)
+
+	-- hover effect
+	b.MouseEnter:Connect(function()
+		bg.BackgroundColor3 = color:Lerp(Color3.new(1,1,1), 0.12)
+	end)
+	b.MouseLeave:Connect(function()
+		bg.BackgroundColor3 = color
+	end)
+
+	return b
+end
+
+local function makeHalfButton(text, xOffset, y, h, color, callback)
+	local halfW = (W - 24 - 8) / 2
+
+	local bg = Instance.new("Frame")
+	bg.Size             = UDim2.new(0, halfW, 0, h)
+	bg.Position         = UDim2.new(0, xOffset, 0, y)
+	bg.BackgroundColor3 = color
+	bg.BorderSizePixel  = 0
+	bg.Parent           = content
+	Instance.new("UICorner", bg).CornerRadius = UDim.new(0, 8)
+
+	local b = Instance.new("TextButton")
+	b.Size                   = UDim2.new(1, 0, 1, 0)
+	b.BackgroundTransparency = 1
+	b.TextColor3             = Color3.new(1, 1, 1)
+	b.Text                   = text
+	b.Font                   = Enum.Font.GothamBold
+	b.TextSize               = 11
+	b.Parent                 = bg
+
+	b.MouseButton1Click:Connect(callback)
+	b.MouseEnter:Connect(function() bg.BackgroundColor3 = color:Lerp(Color3.new(1,1,1), 0.12) end)
+	b.MouseLeave:Connect(function() bg.BackgroundColor3 = color end)
+
+	return b
+end
+
+------------------------------------------------
+-- SLIDER
+------------------------------------------------
+local function createSlider(name, displayName, y, minVal, maxVal, defaultVal)
+	local trackH = 6
+	local thumbSize = 16
+
+	-- Row label + value
+	local row = Instance.new("Frame")
+	row.Size             = UDim2.new(1, -24, 0, 18)
+	row.Position         = UDim2.new(0, 12, 0, y)
+	row.BackgroundTransparency = 1
+	row.Parent           = content
+
+	local nameLbl = Instance.new("TextLabel")
+	nameLbl.Size             = UDim2.new(0.5, 0, 1, 0)
+	nameLbl.BackgroundTransparency = 1
+	nameLbl.Text             = displayName
+	nameLbl.TextColor3       = Color3.fromRGB(200, 200, 220)
+	nameLbl.Font             = Enum.Font.GothamBold
+	nameLbl.TextSize         = 12
+	nameLbl.TextXAlignment   = Enum.TextXAlignment.Left
+	nameLbl.Parent           = row
+
+	local valLbl = Instance.new("TextLabel")
+	valLbl.Size              = UDim2.new(0.5, 0, 1, 0)
+	valLbl.Position          = UDim2.new(0.5, 0, 0, 0)
+	valLbl.BackgroundTransparency = 1
+	valLbl.Text              = string.format("%.2f", defaultVal or minVal)
+	valLbl.TextColor3        = Color3.fromRGB(60, 120, 255)
+	valLbl.Font              = Enum.Font.GothamBold
+	valLbl.TextSize          = 12
+	valLbl.TextXAlignment    = Enum.TextXAlignment.Right
+	valLbl.Parent            = row
+
+	-- Track background
+	local track = Instance.new("Frame")
+	track.Size             = UDim2.new(1, -24, 0, trackH)
+	track.Position         = UDim2.new(0, 12, 0, y + 22)
+	track.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+	track.BorderSizePixel  = 0
+	track.Parent           = content
+	Instance.new("UICorner", track).CornerRadius = UDim.new(1, 0)
+
+	-- Track fill
+	local fill = Instance.new("Frame")
+	fill.Size             = UDim2.new(0, 0, 1, 0)
+	fill.BackgroundColor3 = Color3.fromRGB(60, 120, 255)
+	fill.BorderSizePixel  = 0
+	fill.Parent           = track
+	Instance.new("UICorner", fill).CornerRadius = UDim.new(1, 0)
+
+	-- Thumb
+	local thumb = Instance.new("Frame")
+	thumb.Size             = UDim2.new(0, thumbSize, 0, thumbSize)
+	thumb.Position         = UDim2.new(0, -thumbSize/2, 0.5, -thumbSize/2)
+	thumb.BackgroundColor3 = Color3.new(1, 1, 1)
+	thumb.BorderSizePixel  = 0
+	thumb.ZIndex           = 3
+	thumb.Parent           = track
+	Instance.new("UICorner", thumb).CornerRadius = UDim.new(1, 0)
+
+	-- Thumb inner dot
+	local dot = Instance.new("Frame")
+	dot.Size             = UDim2.new(0, 6, 0, 6)
+	dot.Position         = UDim2.new(0.5, -3, 0.5, -3)
+	dot.BackgroundColor3 = Color3.fromRGB(60, 120, 255)
+	dot.BorderSizePixel  = 0
+	dot.ZIndex           = 4
+	dot.Parent           = thumb
+	Instance.new("UICorner", dot).CornerRadius = UDim.new(1, 0)
+
+	SliderData[name] = { label = valLbl, fill = fill, thumb = thumb }
+
+	-- Set initial position
+	local function setPct(pct)
+		pct = math.clamp(pct, 0, 1)
+		fill.Size     = UDim2.new(pct, 0, 1, 0)
+		thumb.Position = UDim2.new(pct, -thumbSize/2, 0.5, -thumbSize/2)
+	end
+
+	if defaultVal then
+		setPct((defaultVal - minVal) / (maxVal - minVal))
+		valLbl.Text = string.format("%.2f", defaultVal)
+	end
+
+	local dragging = false
+
+	track.InputBegan:Connect(function(i)
+		if i.UserInputType == Enum.UserInputType.MouseButton1 then
+			dragging = true
+		end
+	end)
+	thumb.InputBegan:Connect(function(i)
+		if i.UserInputType == Enum.UserInputType.MouseButton1 then
+			dragging = true
+		end
+	end)
+	UIS.InputEnded:Connect(function(i)
+		if i.UserInputType == Enum.UserInputType.MouseButton1 then
+			dragging = false
+		end
+	end)
+
+	RunService.RenderStepped:Connect(function()
+		if not dragging then return end
+
+		local pct = math.clamp(
+			(mouse.X - track.AbsolutePosition.X) / track.AbsoluteSize.X,
+			0, 1
+		)
+		local value = minVal + pct * (maxVal - minVal)
+
+		setPct(pct)
+		valLbl.Text = string.format("%.2f", value)
+
+		if name == "PULSE" then
+			PulseStrength = value
+			return
+		end
+
+		if name == "MAIN" then
+			for _, w in ipairs({"FL","FR","RL","RR"}) do setWheel(w, value) end
+		elseif name == "FRONT" then
+			setWheel("FL", value)
+			setWheel("FR", value)
+		elseif name == "REAR" then
+			setWheel("RL", value)
+			setWheel("RR", value)
+		else
+			setWheel(name, value)
+		end
+	end)
+end
+
+------------------------------------------------
+-- BUILD UI LAYOUT
+------------------------------------------------
+local y = yPad
+
+-- Actions section
+makeSection("ACTIONS", y) y += 20
+makeHalfButton("⟳  Reinject", 12, y, 30, Color3.fromRGB(30, 30, 42), function()
+	findNearestCar()
+end)
+makeHalfButton("↺  Reset All", 12 + (W-24-8)/2 + 8, y, 30, Color3.fromRGB(30, 30, 42), function()
+	for k, v in pairs(Defaults) do setWheel(k, v) end
+end)
+y += 38
+
+makeButton("⚡  Pulse Front   [ K ]", y, 30, Color3.fromRGB(20, 60, 160), pulseFront)
+y += 38
+
+-- Global sliders
+makeSection("GLOBAL", y) y += 20
+createSlider("MAIN",  "All Wheels",   y, 0, 10, nil) y += 42
+createSlider("FRONT", "Front Axle",   y, 0, 10, nil) y += 42
+createSlider("REAR",  "Rear Axle",    y, 0, 10, nil) y += 42
+
+-- Individual sliders
+makeSection("INDIVIDUAL", y) y += 20
+createSlider("FL", "Front Left",  y, 0, 10, nil) y += 42
+createSlider("FR", "Front Right", y, 0, 10, nil) y += 42
+createSlider("RL", "Rear Left",   y, 0, 10, nil) y += 42
+createSlider("RR", "Rear Right",  y, 0, 10, nil) y += 42
+
+-- Pulse strength
+makeSection("PULSE STRENGTH", y) y += 20
+createSlider("PULSE", "Strength", y, 0, 10, PulseStrength) y += 42
+
+-- Resize frame to fit content
+frame.Size = UDim2.new(0, W, 0, 48 + y + 8)
+frame.Position = UDim2.new(0, 40, 0.5, -(48 + y + 8) / 2)
+
+print("[SuspensionUI] Loaded. Drag header to move. K = pulse.")
+
+wait(.5)
+
+--// Vinny's PLEASE DONT JACK ME MANE
+--// Freeblock
+
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+
+local player = Players.LocalPlayer
+local gui    = player:WaitForChild("PlayerGui")
+
+if gui:FindFirstChild("TurboGUI") then gui.TurboGUI:Destroy() end
+if _G.TURBO_Conn then
+	for _, c in ipairs(_G.TURBO_Conn) do pcall(function() c:Disconnect() end) end
+end
+_G.TURBO_Conn = {}
+
+local screenGui = Instance.new("ScreenGui", gui)
+screenGui.Name = "TurboGUI"
+screenGui.ResetOnSpawn = false
+
+local turboLoop = Instance.new("Sound", screenGui)
+turboLoop.SoundId = "rbxassetid://10185333704"
+turboLoop.Looped  = true
+turboLoop.Volume  = 1
+
+local bovSound = Instance.new("Sound", screenGui)
+bovSound.SoundId = "rbxassetid://80744838994816"
+bovSound.Volume  = 1
+
+local BG      = Color3.fromRGB(16, 16, 22)
+local HEADER  = Color3.fromRGB(22, 22, 32)
+local ROW     = Color3.fromRGB(28, 28, 40)
+local INPUT   = Color3.fromRGB(20, 20, 30)
+local ACCENT  = Color3.fromRGB(80, 220, 140)
+local ON_GRN  = Color3.fromRGB(50, 190, 100)
+local ON_BLU  = Color3.fromRGB(50, 150, 220)
+local ON_ORG  = Color3.fromRGB(210, 120, 40)
+local ON_RED  = Color3.fromRGB(200, 60, 60)
+local OFF     = Color3.fromRGB(32, 32, 46)
+local TXT     = Color3.fromRGB(210, 210, 220)
+local TXT_DIM = Color3.fromRGB(110, 110, 130)
+local DIV     = Color3.fromRGB(36, 36, 54)
+local WHITE   = Color3.new(1,1,1)
+
+local targetBoost      = 50
+local passiveBoost     = 20
+local reverseBoost     = 20
+local currentBoost     = 0
+local turboActive      = false
+local passiveActive    = false
+local passiveRevActive = false
+local brakeMode        = false
+local soundMuted       = false
+local holdingW         = false
+local holdingS         = false
+local selectedParts    = {}
+local rebindTarget     = nil
+
+local dirs = { UP=false, DOWN=false, LEFT=false, RIGHT=false, FORWARD=false, BACK=false }
+
+local keybinds = {
+	turbo      = { key = Enum.KeyCode.Nine, holdMode = false },
+	passive    = { key = Enum.KeyCode.W,    holdMode = true  },
+	passiveRev = { key = Enum.KeyCode.S,    holdMode = true  },
+}
+local kbBtnRefs = {}
+
+local function mkCorner(p, r)
+	local c = Instance.new("UICorner", p)
+	c.CornerRadius = r or UDim.new(0,6)
+end
+
+local function mkFrame(parent, x, y, w, h, color, transparent)
+	local f = Instance.new("Frame", parent)
+	f.Position = UDim2.new(0, x, 0, y)
+	f.Size     = UDim2.new(0, w, 0, h)
+	f.BackgroundColor3 = color or ROW
+	f.BackgroundTransparency = transparent or 0
+	f.BorderSizePixel = 0
+	mkCorner(f)
+	return f
+end
+
+local function mkLabel(parent, txt, x, y, w, h, col, size, align)
+	local l = Instance.new("TextLabel", parent)
+	l.Position            = UDim2.new(0, x, 0, y)
+	l.Size                = UDim2.new(0, w, 0, h)
+	l.BackgroundTransparency = 1
+	l.Text                = txt
+	l.Font                = Enum.Font.GothamMedium
+	l.TextSize            = size or 12
+	l.TextColor3          = col or TXT
+	l.TextXAlignment      = align or Enum.TextXAlignment.Left
+	l.TextYAlignment      = Enum.TextYAlignment.Center
+	l.BorderSizePixel     = 0
+	return l
+end
+
+local function mkBtn(parent, txt, x, y, w, h, bg, tsize)
+	local b = Instance.new("TextButton", parent)
+	b.Position          = UDim2.new(0, x, 0, y)
+	b.Size              = UDim2.new(0, w, 0, h)
+	b.BackgroundColor3  = bg or OFF
+	b.Text              = txt
+	b.Font              = Enum.Font.GothamBold
+	b.TextSize          = tsize or 12
+	b.TextColor3        = TXT
+	b.BorderSizePixel   = 0
+	b.AutoButtonColor   = false
+	mkCorner(b)
+	return b
+end
+
+local function mkBox(parent, txt, x, y, w, h)
+	local b = Instance.new("TextBox", parent)
+	b.Position            = UDim2.new(0, x, 0, y)
+	b.Size                = UDim2.new(0, w, 0, h)
+	b.BackgroundColor3    = INPUT
+	b.Text                = txt
+	b.Font                = Enum.Font.GothamMedium
+	b.TextSize            = 12
+	b.TextColor3          = TXT
+	b.BorderSizePixel     = 0
+	b.ClearTextOnFocus    = false
+	b.TextXAlignment      = Enum.TextXAlignment.Center
+	mkCorner(b)
+	return b
+end
+
+local function mkDivLine(parent, y, padX)
+	padX = padX or 8
+	local f = Instance.new("Frame", parent)
+	f.Position = UDim2.new(0, padX, 0, y)
+	f.Size     = UDim2.new(1, -(padX*2), 0, 1)
+	f.BackgroundColor3 = DIV
+	f.BorderSizePixel  = 0
+	return f
+end
+
+local function mkArrows(parent, x, y, callback)
+	local up = mkBtn(parent, "▲", x, y,     18, 12, INPUT, 8)
+	local dn = mkBtn(parent, "▼", x, y+14,  18, 12, INPUT, 8)
+	up.TextColor3 = ACCENT; dn.TextColor3 = ACCENT
+	up.MouseButton1Click:Connect(function() callback(1)  end)
+	dn.MouseButton1Click:Connect(function() callback(-1) end)
+	return up, dn
+end
+
+local function mkSection(parent, txt, y)
+	local l = mkLabel(parent, txt:upper(), 10, y, 200, 14, TXT_DIM, 9)
+	l.Font = Enum.Font.GothamBold
+	return l
+end
+
+local toggleTab = Instance.new("TextButton", screenGui)
+toggleTab.Size             = UDim2.new(0, 24, 0, 70)
+toggleTab.Position         = UDim2.new(1, -268, 0.5, -35)
+toggleTab.BackgroundColor3 = HEADER
+toggleTab.Text             = "◀"
+toggleTab.Font             = Enum.Font.GothamBold
+toggleTab.TextSize         = 12
+toggleTab.TextColor3       = ACCENT
+toggleTab.BorderSizePixel  = 0
+toggleTab.ZIndex           = 20
+mkCorner(toggleTab, UDim.new(0,5))
+
+local PW = 240
+local PH = 680
+
+local panel = Instance.new("Frame", screenGui)
+panel.Size             = UDim2.new(0, PW, 0, PH)
+panel.Position         = UDim2.new(1, -(PW+30), 0.5, -(PH/2))
+panel.BackgroundColor3 = BG
+panel.BorderSizePixel  = 0
+panel.Active           = true
+panel.Draggable        = true
+mkCorner(panel, UDim.new(0,10))
+
+panel:GetPropertyChangedSignal("AbsolutePosition"):Connect(function()
+	local ap = panel.AbsolutePosition
+	local as = panel.AbsoluteSize
+	toggleTab.Position = UDim2.new(0, ap.X - 28, 0, ap.Y + as.Y/2 - 35)
+end)
+
+local panelOpen = true
+toggleTab.MouseButton1Click:Connect(function()
+	panelOpen = not panelOpen
+	panel.Visible = panelOpen
+	toggleTab.Text = panelOpen and "◀" or "▶"
+end)
+
+
+local hdr = Instance.new("Frame", panel)
+hdr.Size             = UDim2.new(1,0,0,38)
+hdr.Position         = UDim2.new(0,0,0,0)
+hdr.BackgroundColor3 = HEADER
+hdr.BorderSizePixel  = 0
+mkCorner(hdr, UDim.new(0,10))
+local hdrFix = Instance.new("Frame", hdr)
+hdrFix.Size = UDim2.new(1,0,0.5,0); hdrFix.Position = UDim2.new(0,0,0.5,0)
+hdrFix.BackgroundColor3 = HEADER; hdrFix.BorderSizePixel = 0
+
+local titleLbl = mkLabel(hdr, "⚡  Vinny's Turbo", 10, 0, 160, 38, ACCENT, 14)
+titleLbl.Font = Enum.Font.GothamBlack
+
+local muteBtn = mkBtn(hdr, "🔊", PW-38, 8, 28, 22, OFF, 13)
+
+local scroll = Instance.new("ScrollingFrame", panel)
+scroll.Position              = UDim2.new(0,0,0,38)
+scroll.Size                  = UDim2.new(1,0,1,-58)
+scroll.BackgroundTransparency = 1
+scroll.ScrollBarThickness    = 3
+scroll.ScrollBarImageColor3  = Color3.fromRGB(50,50,80)
+scroll.CanvasSize            = UDim2.new(0,0,0,740)
+scroll.BorderSizePixel       = 0
+scroll.ClipsDescendants      = true
+
+local Y = 10
+
+-- SCRGRERR
+mkSection(scroll, "Turbo", Y); Y = Y + 18
+
+local turboCard = mkFrame(scroll, 8, Y, PW-16, 50, ROW)
+local turboBtn = mkBtn(turboCard, "TURBO  OFF", 8, 10, PW-80, 30, OFF, 13)
+turboBtn.Font = Enum.Font.GothamBlack
+local psiBox = mkBox(turboCard, "20", PW-68, 10, 46, 30)
+mkArrows(turboCard, PW-20, 10, function(d)
+	targetBoost = math.max(0, targetBoost+d)
+	psiBox.Text = tostring(targetBoost)
+end)
+mkLabel(turboCard, "", PW-86, 10, 16, 30, TXT_DIM, 9, Enum.TextXAlignment.Right)
+psiBox:GetPropertyChangedSignal("Text"):Connect(function()
+	local v = tonumber(psiBox.Text); if v then targetBoost = math.max(0,v) end
+end)
+
+Y = Y + 60
+
+-- LIKE A TURBO
+mkSection(scroll, "Passive", Y); Y = Y + 18
+
+local passCard = mkFrame(scroll, 8, Y, PW-16, 50, ROW)
+local passBtn = mkBtn(passCard, "PASSIVE  OFF", 8, 10, PW-80, 30, OFF, 12)
+passBtn.Font = Enum.Font.GothamBold
+local passBox = mkBox(passCard, "10", PW-68, 10, 46, 30)
+mkArrows(passCard, PW-20, 10, function(d)
+	passiveBoost = math.max(0, passiveBoost+d)
+	passBox.Text = tostring(passiveBoost)
+end)
+mkLabel(passCard, "", PW-86, 10, 16, 30, TXT_DIM, 9, Enum.TextXAlignment.Right)
+passBox:GetPropertyChangedSignal("Text"):Connect(function()
+	local v = tonumber(passBox.Text); if v then passiveBoost = math.max(0,v) end
+end)
+
+Y = Y + 60
+
+-- REVERSE SKKKRRRTTT
+mkSection(scroll, "Reverse", Y); Y = Y + 18
+
+local revCard = mkFrame(scroll, 8, Y, PW-16, 82, ROW)
+local revBtn = mkBtn(revCard, "REVERSE  OFF", 8, 8, PW-80, 28, OFF, 12)
+revBtn.Font = Enum.Font.GothamBold
+local revBox = mkBox(revCard, "10", PW-68, 8, 46, 28)
+mkArrows(revCard, PW-20, 8, function(d)
+	reverseBoost = math.max(0, reverseBoost+d)
+	revBox.Text = tostring(reverseBoost)
+end)
+mkLabel(revCard, "", PW-86, 8, 16, 28, TXT_DIM, 9, Enum.TextXAlignment.Right)
+revBox:GetPropertyChangedSignal("Text"):Connect(function()
+	local v = tonumber(revBox.Text); if v then reverseBoost = math.max(0,v) end
+end)
+
+mkDivLine(revCard, 44, 8)
+local brakeBtn = mkBtn(revCard, "BRAKE MODE  OFF", 8, 52, PW-32, 22, OFF, 11)
+mkLabel(revCard, "enable this for brakes instead of reverse", 8, 79, PW-32, 0, TXT_DIM, 8)
+revCard.Size = UDim2.new(0, PW-16, 0, 84)
+
+Y = Y + 94
+
+-- TARGET BUTTONNNNN
+mkSection(scroll, "PART TO APPLY BOOST", Y); Y = Y + 18
+
+local targCard = mkFrame(scroll, 8, Y, PW-16, 84, ROW)
+local partBox = mkBox(targCard, "#Weight", 8, 8, PW-32, 24)
+partBox.TextXAlignment = Enum.TextXAlignment.Left
+partBox.PlaceholderText = "Part name or path"
+
+local confirmBtn = mkBtn(targCard, "✔ INJECT", 8, 38, (PW-32)/2-4, 24, Color3.fromRGB(40,155,80))
+confirmBtn.TextColor3 = WHITE; confirmBtn.Font = Enum.Font.GothamBold; confirmBtn.TextSize = 11
+
+local addBtn = mkBtn(targCard, "+  ADD", 8 + (PW-32)/2, 38, (PW-32)/2-4, 24, Color3.fromRGB(30,110,60))
+addBtn.TextColor3 = WHITE; addBtn.Font = Enum.Font.GothamBold; addBtn.TextSize = 11
+
+local targetLbl = mkLabel(targCard, "Target: NONE", 8, 68, PW-32, 14, TXT_DIM, 10)
+
+Y = Y + 94
+
+-- DIRECTIONAL BUTTONSSSDADSAGVDU
+mkSection(scroll, "Direction", Y); Y = Y + 18
+
+local dirCard = mkFrame(scroll, 8, Y, PW-16, 77, ROW)
+
+local BW = 66
+local function dBtn(txt, col, row)
+	local xOff = 8 + col*(BW+4)
+	local yOff = 8 + row*34
+	local b = mkBtn(dirCard, txt, xOff, yOff, BW, 28, OFF, 11)
+	b.TextColor3 = TXT_DIM
+	return b
+end
+
+local dFwd   = dBtn("↑ FWD",  1, 0)
+local dUp    = dBtn("⬆ UP",   0, 0)
+local dDown  = dBtn("⬇ DN",   2, 0)
+local dLeft  = dBtn("← LFT", 0, 1)
+local dBack  = dBtn("↓ BCK",  1, 1)
+local dRight = dBtn("→ RGT",  2, 1)
+
+Y = Y + 82
+
+-- Keybinds
+mkSection(scroll, "Keybinds", Y); Y = Y + 20
+
+local kbCard = mkFrame(scroll, 8, Y, PW-16, 116, ROW)
+
+local function kn(kc)
+	local s = tostring(kc); return s:match("KeyCode%.(.+)") or s
+end
+
+local function mkKbRow(parent, labelTxt, yy, kbKey)
+	mkLabel(parent, labelTxt, 10, yy, 60, 28, TXT_DIM, 11)
+
+	local kb = mkBtn(parent, kn(keybinds[kbKey].key), 72, yy, 68, 28, INPUT, 11)
+	kb.TextColor3 = ACCENT; kb.Font = Enum.Font.GothamMedium
+
+	mkLabel(parent, "HOLD", 148, yy, 30, 28, TXT_DIM, 9, Enum.TextXAlignment.Center)
+
+	local hm  = keybinds[kbKey].holdMode
+	local chk = mkBtn(parent, hm and "☑" or "☐", 182, yy+4, 22, 20, OFF, 14)
+	chk.TextColor3 = hm and ACCENT or TXT_DIM
+
+	chk.MouseButton1Click:Connect(function()
+		keybinds[kbKey].holdMode = not keybinds[kbKey].holdMode
+		local on = keybinds[kbKey].holdMode
+		chk.Text = on and "☑" or "☐"
+		chk.TextColor3 = on and ACCENT or TXT_DIM
+	end)
+-- losing my fucking mind making this part
+	kb.MouseButton1Click:Connect(function()
+		rebindTarget = kbKey
+		kb.Text = "..."
+		kb.TextColor3 = Color3.fromRGB(255,210,60)
+	end)
+
+	kbBtnRefs[kbKey] = kb
+end
+
+mkKbRow(kbCard, "Turbo",   4,  "turbo")
+mkDivLine(kbCard, 38, 8)
+mkKbRow(kbCard, "Passive", 42, "passive")
+mkDivLine(kbCard, 76, 8)
+mkKbRow(kbCard, "Reverse", 80, "passiveRev")
+
+Y = Y + 116
+
+scroll.CanvasSize = UDim2.new(0, 0, 0, Y + 10)
+
+
+local footer = Instance.new("TextLabel", panel)
+footer.Size                   = UDim2.new(1, 0, 0, 20)
+footer.Position               = UDim2.new(0, 0, 1, -20)
+footer.BackgroundTransparency = 1
+footer.Text                   = "Vinny's Script pls no steal"
+footer.Font                   = Enum.Font.GothamBold
+footer.TextSize               = 10
+footer.TextColor3             = TXT_DIM
+footer.TextXAlignment         = Enum.TextXAlignment.Center
+footer.TextYAlignment         = Enum.TextYAlignment.Center
+footer.BorderSizePixel        = 0
+
+
+local function addNeonOutline(part)
+	if not part or not part:IsA("BasePart") then return end
+	local sel = Instance.new("SelectionBox", workspace)
+	sel.Adornee             = part
+	sel.Color3              = Color3.fromRGB(0,255,120)
+	sel.LineThickness       = 0.07
+	sel.SurfaceTransparency = 0.75
+	sel.SurfaceColor3       = Color3.fromRGB(0,255,100)
+	local t0 = tick()
+	local conn; conn = RunService.RenderStepped:Connect(function()
+		local e = tick()-t0
+		if e >= 2 then pcall(function() sel:Destroy() end); conn:Disconnect(); return end
+		local fade    = e/2
+		local flicker = e < 0.4 and (0.5+0.5*math.sin(e*math.pi*24)) or 1
+		sel.SurfaceTransparency = 0.75+0.25*fade
+		sel.Color3 = Color3.fromRGB(0, math.floor(255*(1-fade)*flicker+60*fade), math.floor(80+40*(1-fade)))
+	end)
+end
+
+local function updateTargetLbl()
+	if #selectedParts == 0 then
+		targetLbl.Text = "Target: NONE"
+	elseif #selectedParts == 1 then
+		targetLbl.Text = "Target: "..selectedParts[1].Name
+	else
+		targetLbl.Text = "Target: "..selectedParts[1].Name.."  (+"..( #selectedParts-1).." more)"
+	end
+end
+
+local function clearTargets() selectedParts = {}; updateTargetLbl() end
+
+local function addTarget(p)
+	if not p then return end
+	for _,x in ipairs(selectedParts) do if x==p then return end end
+	table.insert(selectedParts, p)
+	updateTargetLbl()
+	addNeonOutline(p)
+end
+
+local function getHRP()
+	local ch = player.Character or player.CharacterAdded:Wait()
+	return ch:WaitForChild("HumanoidRootPart")
+end
+
+local function findByPath(txt)
+	if not txt or txt=="" then return nil end
+	txt = txt:gsub("%s+","")
+	if txt:lower():sub(1,10)=="workspace." then txt=txt:sub(11) end
+	local cur = workspace
+	for seg in txt:gmatch("[^%.]+") do
+		local found
+		for _,ch in ipairs(cur:GetChildren()) do
+			if ch.Name:lower()==seg:lower() then found=ch; break end
+		end
+		if not found then return nil end
+		cur = found
+	end
+	return (cur and cur:IsA("BasePart")) and cur or nil
+end
+
+local function findNearest(q)
+	local hrp = getHRP()
+	local best, bestD, bestS = nil, math.huge, -1
+	q = tostring(q):lower()
+	for _,obj in ipairs(workspace:GetDescendants()) do
+		if obj:IsA("BasePart") then
+			local n = obj.Name:lower()
+			if n:find(q,1,true) then
+				local d = (obj.Position-hrp.Position).Magnitude
+				local s = n==q and 1000 or (500-(#n-#q))
+				if s>bestS or (s==bestS and d<bestD) then best,bestD,bestS=obj,d,s end
+			end
+		end
+	end
+	return best
+end
+
+local function findPart(txt)
+	if not txt or txt=="" then txt="#Weight" end
+	return findByPath(txt) or findNearest(txt)
+end
+
+local function getDir(part, reversed)
+	if not part then return Vector3.zero end
+	local lk = part.CFrame.LookVector
+	local rt = part.CFrame.RightVector
+	local up = Vector3.new(0,1,0)
+	local v  = Vector3.zero
+	if dirs.FORWARD then v+=lk end
+	if dirs.BACK    then v-=lk end
+	if dirs.RIGHT   then v+=rt end
+	if dirs.LEFT    then v-=rt end
+	if dirs.UP      then v+=up end
+	if dirs.DOWN    then v-=up end
+	if v.Magnitude==0 then return Vector3.zero end
+	v = v.Unit
+	if reversed then v=-v end
+	return v
+end
+
+local function visTurbo(on)
+	turboBtn.Text = on and "TURBO   ON" or "TURBO  OFF"
+	turboBtn.BackgroundColor3 = on and ON_GRN or OFF
+	turboBtn.TextColor3 = on and WHITE or TXT
+end
+local function visPassive(on)
+	passBtn.Text = on and "PASSIVE   ON" or "PASSIVE  OFF"
+	passBtn.BackgroundColor3 = on and ON_BLU or OFF
+	passBtn.TextColor3 = on and WHITE or TXT
+end
+local function visRev(on)
+	revBtn.Text = on and "REVERSE   ON" or "REVERSE  OFF"
+	revBtn.BackgroundColor3 = on and ON_ORG or OFF
+	revBtn.TextColor3 = on and WHITE or TXT
+end
+local function visBrake(on)
+	brakeBtn.Text = on and "BRAKE MODE   ON" or "BRAKE MODE  OFF"
+	brakeBtn.BackgroundColor3 = on and ON_RED or OFF
+	brakeBtn.TextColor3 = on and WHITE or TXT
+end
+
+local function setTurbo(on)
+	if turboActive==on then return end
+	turboActive = on
+	visTurbo(on)
+	if not soundMuted then
+		if on then turboLoop:Play() else turboLoop:Stop(); bovSound:Play() end
+	else
+		if not on then turboLoop:Stop() end
+	end
+end
+
+local function setPassive(on) passiveActive=on; visPassive(on) end
+local function setRev(on)     passiveRevActive=on; visRev(on)  end
+
+turboBtn.MouseButton1Click:Connect(function() setTurbo(not turboActive) end)
+passBtn.MouseButton1Click:Connect(function()  setPassive(not passiveActive) end)
+revBtn.MouseButton1Click:Connect(function()   setRev(not passiveRevActive) end)
+
+brakeBtn.MouseButton1Click:Connect(function()
+	brakeMode = not brakeMode; visBrake(brakeMode)
+end)
+
+muteBtn.MouseButton1Click:Connect(function()
+	soundMuted = not soundMuted
+	muteBtn.Text = soundMuted and "🔇" or "🔊"
+	muteBtn.BackgroundColor3 = soundMuted and Color3.fromRGB(70,25,25) or OFF
+	if soundMuted then turboLoop:Stop() end
+end)
+
+confirmBtn.MouseButton1Click:Connect(function()
+	clearTargets(); local f=findPart(partBox.Text); if f then addTarget(f) end
+end)
+addBtn.MouseButton1Click:Connect(function()
+	local f=findPart(partBox.Text); if f then addTarget(f) end
+end)
+
+local dirMap = {
+	{dFwd,  "FORWARD"}, {dUp,  "UP"},    {dDown, "DOWN"},
+	{dLeft, "LEFT"},    {dBack,"BACK"},   {dRight,"RIGHT"},
+}
+for _,e in ipairs(dirMap) do
+	e[1].MouseButton1Click:Connect(function()
+		dirs[e[2]] = not dirs[e[2]]
+		local on = dirs[e[2]]
+		e[1].BackgroundColor3 = on and ON_GRN or OFF
+		e[1].TextColor3 = on and WHITE or TXT_DIM
+	end)
+end
+
+UserInputService.InputBegan:Connect(function(inp, gpe)
+	if gpe then return end
+
+	if rebindTarget then
+		keybinds[rebindTarget].key = inp.KeyCode
+		local ref = kbBtnRefs[rebindTarget]
+		if ref then ref.Text = kn(inp.KeyCode); ref.TextColor3 = ACCENT end
+		rebindTarget = nil
+		return
+	end
+
+	local kc = inp.KeyCode
+	if kc == keybinds.turbo.key then
+		if keybinds.turbo.holdMode then setTurbo(true) else setTurbo(not turboActive) end
+	end
+	if kc == keybinds.passive.key then
+		if keybinds.passive.holdMode then holdingW = true else setPassive(not passiveActive) end
+	end
+	if kc == keybinds.passiveRev.key then
+		if keybinds.passiveRev.holdMode then holdingS = true else setRev(not passiveRevActive) end
+	end
+end)
+
+UserInputService.InputEnded:Connect(function(inp)
+	local kc = inp.KeyCode
+	if kc==keybinds.turbo.key      and keybinds.turbo.holdMode      then setTurbo(false)  end
+	if kc==keybinds.passive.key    and keybinds.passive.holdMode     then holdingW = false  end
+	if kc==keybinds.passiveRev.key and keybinds.passiveRev.holdMode  then holdingS = false  end
+end)
+
+local driveConn = RunService.RenderStepped:Connect(function(dt)
+
+	if turboActive and not soundMuted and not turboLoop.IsPlaying then
+		turboLoop:Play()
+	end
+
+	for _, part in ipairs(selectedParts) do
+		if part and part:IsDescendantOf(workspace) then
+			pcall(function() part:SetNetworkOwner(player) end)
+
+			if turboActive then
+				local dir = getDir(part, false)
+				if dir.Magnitude > 0 then
+					currentBoost += (targetBoost - currentBoost) * 0.1
+					part.AssemblyLinearVelocity += dir * (currentBoost * dt * 10)
+				end
+			else
+				currentBoost = currentBoost * 0.85
+			end
+
+			local doPassive = passiveActive and
+				(not keybinds.passive.holdMode or holdingW)
+			if doPassive then
+				local dir = getDir(part, false)
+				if dir.Magnitude > 0 then
+					part.AssemblyLinearVelocity += dir * (passiveBoost * dt * 10)
+				end
+			end
+
+			local doRev = passiveRevActive and
+				(not keybinds.passiveRev.holdMode or holdingS)
+			if doRev then
+				local dir = getDir(part, true)
+				if dir.Magnitude > 0 then
+					if brakeMode then
+						local vel = part.AssemblyLinearVelocity
+						local fwdSpeed = vel:Dot(-dir)
+						if fwdSpeed > 0 then
+							local force = math.min(fwdSpeed / dt, reverseBoost * 10)
+							part.AssemblyLinearVelocity += dir * (force * dt)
+						end
+					else
+						part.AssemblyLinearVelocity += dir * (reverseBoost * dt * 10)
+					end
+				end
+			end
+
+		end
+	end
+end)
+
+table.insert(_G.TURBO_Conn, driveConn)
